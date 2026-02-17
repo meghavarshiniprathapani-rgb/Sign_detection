@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import joblib
 import mediapipe as mp
-import time
 from collections import deque, Counter
 
 base_dir = os.path.dirname(os.path.dirname(__file__))
@@ -19,6 +18,7 @@ def normalize_hand(hand_vector):
         return hand_vector
 
     hand_vector = hand_vector.reshape(21, 3)
+
     wrist = hand_vector[0]
     hand_vector = hand_vector - wrist
 
@@ -28,12 +28,7 @@ def normalize_hand(hand_vector):
 
     return hand_vector.flatten()
 
-prediction_buffer = deque(maxlen=20)
-seal_start_time = None
-confirmed_seal = None
-
-CONFIDENCE_THRESHOLD = 0.80
-HOLD_TIME = 0.8
+prediction_buffer = deque(maxlen=15)
 
 cap = cv2.VideoCapture(0)
 
@@ -53,82 +48,48 @@ with mp_hands.Hands(
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = hands.process(rgb)
 
-        h, w, _ = frame.shape
+        left = np.zeros(63)
+        right = np.zeros(63)
 
-        if result.multi_hand_landmarks and len(result.multi_hand_landmarks) >= 1:
+        if result.multi_hand_landmarks and result.multi_handedness:
+            for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
+                lr_label = result.multi_handedness[idx].classification[0].label
 
-            all_points = []
-            for hand_landmarks in result.multi_hand_landmarks:
-                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                coords = []
                 for lm in hand_landmarks.landmark:
-                    all_points.append([lm.x * w, lm.y * h])
+                    coords.extend([lm.x, lm.y, lm.z])
 
-            all_points = np.array(all_points)
-            x_min, y_min = np.min(all_points, axis=0)
-            x_max, y_max = np.max(all_points, axis=0)
-
-            area = (x_max - x_min) * (y_max - y_min)
-
-            if area > 12000:
-
-                left = np.zeros(63)
-                right = np.zeros(63)
-
-                for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
-                    coords = []
-                    for lm in hand_landmarks.landmark:
-                        coords.extend([lm.x, lm.y, lm.z])
-
-                    if idx == 0:
-                        left = np.array(coords)
-                    elif idx == 1:
-                        right = np.array(coords)
-
-                left = normalize_hand(left)
-                right = normalize_hand(right)
-
-                feature_vector = np.concatenate([left, right]).reshape(1, -1)
-
-                probs = model.predict_proba(feature_vector)[0]
-                best_index = np.argmax(probs)
-                confidence = probs[best_index]
-                prediction = model.classes_[best_index]
-
-                if confidence > CONFIDENCE_THRESHOLD:
-                    prediction_buffer.append(prediction)
-
-                    most_common = Counter(prediction_buffer).most_common(1)[0][0]
-
-                    if confirmed_seal != most_common:
-                        seal_start_time = time.time()
-                        confirmed_seal = most_common
-
-                    if time.time() - seal_start_time > HOLD_TIME:
-                        cv2.putText(
-                            frame,
-                            f"Seal: {most_common}",
-                            (10, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            (0, 255, 0),
-                            2
-                        )
+                if lr_label == "Left":
+                    left = np.array(coords)
                 else:
-                    prediction_buffer.clear()
-                    confirmed_seal = None
-                    seal_start_time = None
+                    right = np.array(coords)
 
-            else:
-                prediction_buffer.clear()
-                confirmed_seal = None
-                seal_start_time = None
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
+            left = normalize_hand(left)
+            right = normalize_hand(right)
+
+            feature_vector = np.concatenate([left, right]).reshape(1, -1)
+
+            prediction = model.predict(feature_vector)[0]
+            prediction_buffer.append(prediction)
+
+        if len(prediction_buffer) > 0:
+            most_common = Counter(prediction_buffer).most_common(1)[0][0]
         else:
-            prediction_buffer.clear()
-            confirmed_seal = None
-            seal_start_time = None
+            most_common = "..."
 
-        cv2.imshow("Naruto Seal Recognition (Stable Mode)", frame)
+        cv2.putText(
+            frame,
+            f"Seal: {most_common}",
+            (10, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.imshow("Naruto Dynamic Seal Recognition", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
