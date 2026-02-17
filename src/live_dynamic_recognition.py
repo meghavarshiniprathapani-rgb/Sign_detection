@@ -48,8 +48,8 @@ with mp_hands.Hands(
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = hands.process(rgb)
 
-        left = np.zeros(63)
-        right = np.zeros(63)
+        left = None
+        right = None
 
         if result.multi_hand_landmarks and result.multi_handedness:
             for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
@@ -61,10 +61,12 @@ with mp_hands.Hands(
 
                 if lr_label == "Left":
                     left = np.array(coords)
-                else:
+                elif lr_label == "Right":
                     right = np.array(coords)
 
                 mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+        if left is not None and right is not None:
 
             left = normalize_hand(left)
             right = normalize_hand(right)
@@ -74,22 +76,32 @@ with mp_hands.Hands(
             prediction = model.predict(feature_vector)[0]
             prediction_buffer.append(prediction)
 
-        if len(prediction_buffer) > 0:
             most_common = Counter(prediction_buffer).most_common(1)[0][0]
+
+            cv2.putText(
+                frame,
+                f"Seal: {most_common}",
+                (10, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2
+            )
+
         else:
-            most_common = "..."
+            prediction_buffer.clear()
 
-        cv2.putText(
-            frame,
-            f"Seal: {most_common}",
-            (10, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
-        )
+            cv2.putText(
+                frame,
+                "Show BOTH hands for Naruto Seal",
+                (10, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2
+            )
 
-        cv2.imshow("Naruto Dynamic Seal Recognition", frame)
+        cv2.imshow("Naruto Two-Hand Dynamic Recognition", frame)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break
