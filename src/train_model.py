@@ -5,13 +5,13 @@ import joblib
 import mediapipe as mp
 
 from sklearn.model_selection import train_test_split
-from sklearn.neural_network import MLPClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, confusion_matrix
 
 base_dir = os.path.dirname(os.path.dirname(__file__))
-image_root = os.path.join(base_dir, "dataset", "test")
+image_root = os.path.join(base_dir, "dataset")
 model_path = os.path.join(base_dir, "models", "naruto_seal_model.pkl")
 
 mp_hands = mp.solutions.hands
@@ -19,8 +19,55 @@ mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=True,
     max_num_hands=2,
-    min_detection_confidence=0.5
+    min_detection_confidence=0.7
 )
+
+def extract_relative_features(left_raw, right_raw):
+    # Base scale on the size of the overall left hand bounding width/height approx
+    # or distance between wrist and middle MCP (index 9)
+    scale = np.linalg.norm(left_raw[9] - left_raw[0])
+    if scale == 0:
+        scale = 1.0
+        
+    # Key contact points in Naruto Seals: Wrists, Thumbs, Index, Middle, Ring, Pinky
+    # Indices: 0, 4, 8, 12, 16, 20
+    contact_points = [0, 4, 8, 12, 16, 20]
+    
+    rel_features = []
+    for pt in contact_points:
+        # Scale-invariant distance between the identical fingertips of both hands
+        dist = np.linalg.norm(left_raw[pt] - right_raw[pt]) / scale
+        rel_features.append(dist)
+        
+    return np.array(rel_features)
+
+def extract_angles(hand_vector):
+    if np.sum(hand_vector) == 0:
+        return np.zeros(5)
+
+    try:
+        hand_vector = hand_vector.reshape(21, 3)
+    except Exception:
+        return np.zeros(5)
+        
+    angles = []
+    
+    # Finger bases: Thumb=2, Index=5, Middle=9, Ring=13, Pinky=17
+    finger_bases = [2, 5, 9, 13, 17]
+    # Finger PIPs (first joint): Thumb=3, Index=6, Middle=10, Ring=14, Pinky=18
+    finger_pips = [3, 6, 10, 14, 18]
+    wrist = hand_vector[0]
+
+    for base, pip in zip(finger_bases, finger_pips):
+        v1 = hand_vector[base] - wrist
+        v2 = hand_vector[pip] - hand_vector[base]
+        
+        # Calculate angle between v1 and v2
+        cosine_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+        angles.append(angle)
+        
+    return np.array(angles)
 
 def normalize_hand(hand_vector):
     if np.sum(hand_vector) == 0:
@@ -86,25 +133,43 @@ for label in os.listdir(image_root):
 
             if result.multi_hand_landmarks and result.multi_handedness:
                 for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
-                    lr_label = result.multi_handedness[idx].classification[0].label
-
-                    coords = []
-                    for lm in hand_landmarks.landmark:
-                        coords.extend([lm.x, lm.y, lm.z])
-
-                    if lr_label == "Left":
-                        left = np.array(coords)
-                    else:
-                        right = np.array(coords)
+                    # In real life, camera flips or hand crossing can confuse "Left" vs "Right".
+                    # A robust method is just sorting by wrist x-coordinate if we have 2 hands
+                    pass
+                
+                # If we have exactly 2 hands, sort them by x-coordinate: left screen vs right screen
+                if len(result.multi_hand_landmarks) == 2:
+                    hands_data = []
+                    for hand_landmarks in result.multi_hand_landmarks:
+                        coords = []
+                        for lm in hand_landmarks.landmark:
+                            coords.extend([lm.x, lm.y, lm.z])
+                        hands_data.append((hand_landmarks.landmark[0].x, np.array(coords)))
+                    
+                    # Sort by X coordinate: index 0 is left-most on screen, index 1 is right-most
+                    hands_data.sort(key=lambda x: x[0])
+                    
+                    left = hands_data[0][1]
+                    right = hands_data[1][1]
+                    
+                    left_angles = extract_angles(left)
+                    right_angles = extract_angles(right)
+                    
+                    # Compute spatial relationship before destroying it via normalization
+                    left_raw = left.reshape(21, 3)
+                    right_raw = right.reshape(21, 3)
+                    rel_features = extract_relative_features(left_raw, right_raw)
 
             left = normalize_hand(left)
             right = normalize_hand(right)
 
-            feature_vector = np.concatenate([left, right])
+            # If there's only 1 hand, rel_features won't be defined. Only process if 2 hands.
+            if result.multi_hand_landmarks and len(result.multi_hand_landmarks) == 2:
+                feature_vector = np.concatenate([left, right, left_angles, right_angles, rel_features])
 
-            if np.sum(feature_vector) != 0:
-                X.append(feature_vector)
-                y.append(label)
+                if np.sum(feature_vector) != 0:
+                    X.append(feature_vector)
+                    y.append(label)
 
 hands.close()
 
@@ -126,15 +191,12 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 model = Pipeline([
     ("scaler", StandardScaler()),
-    ("mlp", MLPClassifier(
-        hidden_layer_sizes=(256, 128, 64),
-        activation="relu",
-        solver="adam",
-        learning_rate_init=0.0008,
-        alpha=0.0005,
-        max_iter=350,
+    ("rf", RandomForestClassifier(
+        n_estimators=300,
+        max_depth=20,
         random_state=42,
-        verbose=True
+        n_jobs=-1,
+        verbose=0
     ))
 ])
 
